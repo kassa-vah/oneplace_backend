@@ -12,7 +12,7 @@ def _extract_bearer_token() -> str | None:
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
         return None
-    return header.removeprefix("Bearer ").strip()
+    return header[len("Bearer "):].strip()
 
 
 def require_firebase_auth(fn):
