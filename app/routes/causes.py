@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 from flask import Blueprint, jsonify, request, g
 
@@ -15,6 +16,16 @@ from app.models.admin import record_audit
 # separate Blueprint objects, which was unnecessary indirection for
 # what is, underneath, one resource.
 causes_bp = Blueprint("causes", __name__)
+
+
+def _parse_decimal(value, field_name):
+    """Manual numeric admin input (raised_amount, goal_amount) — reject
+    anything that isn't a clean number rather than letting a bad string
+    silently become 0 via a bare Decimal() call."""
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError):
+        raise ValueError(f"{field_name} must be a number")
 
 
 # --- Public ---------------------------------------------------------
@@ -86,6 +97,16 @@ def create_cause():
     if beneficiary_id and Beneficiary.query.get(beneficiary_id) is None:
         return jsonify({"error": "beneficiary_id does not exist"}), 400
 
+    try:
+        raised_amount = _parse_decimal(payload.get("raised_amount", 0), "raised_amount")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    try:
+        donors_count = int(payload.get("donors_count", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "donors_count must be an integer"}), 400
+
     base_slug = slugify(title)
     slug = base_slug
     suffix = 2
@@ -106,6 +127,12 @@ def create_cause():
         status=CauseStatus.DRAFT,
         featured=bool(payload.get("featured", False)),
         display_order=int(payload.get("display_order", 0)),
+        tag=payload.get("tag"),
+        location=payload.get("location"),
+        story=payload.get("story"),
+        need=payload.get("need"),
+        raised_amount=raised_amount,
+        donors_count=donors_count,
     )
     db.session.add(cause)
     db.session.flush()  # get cause.id before the audit row references it
@@ -136,6 +163,18 @@ def update_cause(cause_id):
         if beneficiary_id and Beneficiary.query.get(beneficiary_id) is None:
             return jsonify({"error": "beneficiary_id does not exist"}), 400
 
+    if "raised_amount" in payload:
+        try:
+            payload["raised_amount"] = _parse_decimal(payload["raised_amount"], "raised_amount")
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    if "donors_count" in payload:
+        try:
+            payload["donors_count"] = int(payload["donors_count"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "donors_count must be an integer"}), 400
+
     editable_fields = (
         "title",
         "description",
@@ -145,6 +184,12 @@ def update_cause(cause_id):
         "currency",
         "featured",
         "display_order",
+        "tag",
+        "location",
+        "story",
+        "need",
+        "raised_amount",
+        "donors_count",
     )
     for field in editable_fields:
         if field in payload:

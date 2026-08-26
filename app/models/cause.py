@@ -40,17 +40,28 @@ class Cause(TimestampMixin, db.Model):
     featured = db.Column(db.Boolean, nullable=False, default=False)
     display_order = db.Column(db.Integer, nullable=False, default=0)
 
-    # goal_amount is informational only — actual raised totals are computed
-    # from Donation records (spec #66), never stored as a trusted counter
-    # on this model. A cached column can be added later once that
-    # aggregation pipeline exists.
+    # Presentation-only content, admin-editable. No structured schema on
+    # the source content docs, so these are free-form strings.
+    tag = db.Column(db.String(100), nullable=True)
+    location = db.Column(db.String(255), nullable=True)
+    story = db.Column(db.Text, nullable=True)
+    need = db.Column(db.Text, nullable=True)
+
+    # goal_amount is informational only. raised_amount / donors_count are
+    # ALSO manual, admin-typed numbers for now — not computed from Donation
+    # records. That aggregation (spec #66) can replace these two columns
+    # later without changing the public API shape.
     goal_amount = db.Column(db.Numeric(12, 2), nullable=True)
+    raised_amount = db.Column(db.Numeric(12, 2), nullable=False, default=0)
+    donors_count = db.Column(db.Integer, nullable=False, default=0)
     currency = db.Column(db.String(3), nullable=False, default="KES")
 
     archived_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         db.CheckConstraint("goal_amount IS NULL OR goal_amount > 0", name="ck_cause_goal_amount_positive"),
+        db.CheckConstraint("raised_amount >= 0", name="ck_cause_raised_amount_nonnegative"),
+        db.CheckConstraint("donors_count >= 0", name="ck_cause_donors_count_nonnegative"),
         db.CheckConstraint("currency IS NOT NULL", name="ck_cause_currency_not_null"),
     )
 
@@ -64,7 +75,13 @@ class Cause(TimestampMixin, db.Model):
             "beneficiary": self.beneficiary.to_public_dict() if self.beneficiary else None,
             "cover_image_url": self.cover_image_url,
             "featured": self.featured,
+            "tag": self.tag,
+            "location": self.location,
+            "story": self.story,
+            "need": self.need,
             "goal_amount": str(self.goal_amount) if self.goal_amount is not None else None,
+            "raised_amount": str(self.raised_amount),
+            "donors_count": self.donors_count,
             "currency": self.currency,
         }
 
