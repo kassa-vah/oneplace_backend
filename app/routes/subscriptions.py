@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from flask import Blueprint, jsonify, request, g
+from flask import Blueprint, jsonify, request, g, current_app
 
 from app.extensions import db
 from app.utils.decorators import require_firebase_auth, require_admin
@@ -10,11 +10,9 @@ from app.models.donation import Donor, Donation, DonationStatus, PaymentTransact
 from app.models.subscription import Subscription, SubscriptionStatus
 from app.models.admin import record_audit
 from app.services.email import email_service
+from app.services.recaptcha import verify_recaptcha
 
-# One blueprint for the whole resource — public/self-service routes and
-# admin routes both live here, distinguished by path and decorator, not
-# by separate Blueprint objects. (Cut from two blueprints to one per
-# resource across the app — see /api/admin/* paths below.)
+
 subscriptions_bp = Blueprint("subscriptions", __name__)
 
 
@@ -27,18 +25,32 @@ def create_subscription():
     links the Donor record to their Firebase account so they can later
     view/cancel their own subscription (see /api/subscriptions/me
     below). Registering here does not grant any admin access — that's
-    an entirely separate flow (see auth.py / admins.py).
+    an entirely separate flow, and there is no self-service way to
+    request it (see admins.py — only a superadmin can promote someone).
+
+    Also requires reCAPTCHA + privacy-policy consent, verified/recorded
+    here rather than in a separate round trip, since the frontend flow
+    is: sign in -> "choose your subscription" -> consent form with
+    reCAPTCHA -> this call.
     """
     payload = request.get_json(silent=True) or {}
 
     cause_id = payload.get("cause_id")
     amount = payload.get("amount")
     email = g.firebase_user.get("email")
+    recaptcha_token = payload.get("recaptcha_token")
+    consent_version = payload.get("consent_version")
 
     if not email:
         return jsonify({"error": "Firebase account has no email on record"}), 400
     if not cause_id or amount is None:
         return jsonify({"error": "cause_id and amount are required"}), 400
+    if not consent_version:
+        return jsonify({"error": "consent_version is required (accept the privacy policy first)"}), 400
+
+    if not current_app.config.get("SKIP_RECAPTCHA"):
+        if not verify_recaptcha(recaptcha_token, current_app.config.get("RECAPTCHA_SECRET_KEY"), request.remote_addr):
+            return jsonify({"error": "reCAPTCHA verification failed"}), 400
 
     try:
         amount = float(amount)
@@ -59,6 +71,8 @@ def create_subscription():
         phone=payload.get("phone"),
         country=payload.get("country"),
     )
+    donor.consent_accepted_at = datetime.now(timezone.utc)
+    donor.consent_version = consent_version
 
     subscription = Subscription(
         donor_id=donor.id,

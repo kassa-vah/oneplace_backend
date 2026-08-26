@@ -33,6 +33,12 @@ class Donor(TimestampMixin, db.Model):
     marketing_emails = db.Column(db.Boolean, nullable=False, default=False)
     impact_updates = db.Column(db.Boolean, nullable=False, default=False)
 
+    # Privacy policy consent, captured (with reCAPTCHA) at subscription
+    # sign-up time. consent_version lets you tell who agreed to an older
+    # policy if you ever change it.
+    consent_accepted_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    consent_version = db.Column(db.String(20), nullable=True)
+
     donations = db.relationship("Donation", back_populates="donor")
     subscriptions = db.relationship("Subscription", back_populates="donor")
 
@@ -74,6 +80,7 @@ class Donor(TimestampMixin, db.Model):
         return {
             "id": self.id,
             "email": self.email,
+            "firebase_uid": self.firebase_uid,
             "first_name": self.first_name,
             "last_name": self.last_name,
             "phone": self.phone,
@@ -81,6 +88,8 @@ class Donor(TimestampMixin, db.Model):
             "email_receipts": self.email_receipts,
             "marketing_emails": self.marketing_emails,
             "impact_updates": self.impact_updates,
+            "consent_accepted_at": self.consent_accepted_at.isoformat() if self.consent_accepted_at else None,
+            "consent_version": self.consent_version,
             "created_at": self.created_at.isoformat(),
         }
 

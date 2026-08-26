@@ -3,8 +3,9 @@ from flask import Blueprint, jsonify, request, g
 from app.extensions import db
 from app.utils.decorators import require_firebase_auth
 from app.utils.security import hash_token
-from app.models.admin import AdminUser, AdminRole, AdminStatus, AdminInvitation, InvitationStatus, record_audit
+from app.models.admin import AdminUser, AdminStatus, AdminInvitation, InvitationStatus, record_audit
 from app.models.donation import normalize_email
+
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
@@ -18,40 +19,6 @@ def get_current_identity():
     if admin is None:
         return jsonify({"is_admin": False, "status": None})
     return jsonify({"is_admin": admin.is_active_admin(), **admin.to_dict()})
-
-
-@auth_bp.post("/request-access")
-@require_firebase_auth
-def request_admin_access():
-    """
-    A signed-in Firebase user asks to become an admin. This does NOT
-    grant access — it creates a `pending` AdminUser row that a
-    superadmin must approve (spec #72's alternate flow). A normal site
-    visitor never becomes an admin just by calling this.
-    """
-    firebase_uid = g.firebase_user["uid"]
-    email = g.firebase_user.get("email")
-
-    if not email:
-        return jsonify({"error": "Firebase account has no email on record"}), 400
-
-    existing = AdminUser.query.filter_by(firebase_uid=firebase_uid).first()
-    if existing is not None:
-        return jsonify(existing.to_dict()), 200
-
-    payload = request.get_json(silent=True) or {}
-
-    admin = AdminUser(
-        firebase_uid=firebase_uid,
-        email=normalize_email(email),
-        name=payload.get("name"),
-        role=AdminRole.ADMIN,
-        status=AdminStatus.PENDING,
-    )
-    db.session.add(admin)
-    db.session.commit()
-
-    return jsonify(admin.to_dict()), 201
 
 
 @auth_bp.post("/invitations/accept")

@@ -53,6 +53,9 @@ class EmailService:
     def send_admin_invitation(self, email: str, invite_link: str):
         logger.info("[email stub] would send admin invitation to=%s link=%s", email, invite_link)
 
+    def send_admin_promotion(self, email: str, role: str):
+        logger.info("[email stub] would send congratulatory promotion email to=%s role=%s", email, role)
+
     def send_contact_ack(self, message):
         logger.info("[email stub] would send contact ack to=%s", message.email)
 

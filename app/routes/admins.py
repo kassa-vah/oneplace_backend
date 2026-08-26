@@ -7,14 +7,16 @@ from app.utils.decorators import require_superadmin
 from app.utils.pagination import paginate_query
 from app.utils.security import generate_invitation_token, hash_token
 from app.models.admin import AdminUser, AdminRole, AdminStatus, AdminInvitation, InvitationStatus, record_audit
-from app.models.donation import normalize_email
+from app.models.donation import Donor, normalize_email
 from app.services.email import email_service
 
-# Superadmin-only management of OTHER admins: approve, suspend, and
-# invite. Everything here is something a superadmin does TO someone
+# Superadmin-only management of OTHER admins: approve, suspend, invite,
+# and — the main path now — promote an existing registered user
+# directly. Everything here is something a superadmin does TO someone
 # else's account — contrast with auth.py, which is what a signed-in
-# user does to their OWN account (check status, request access, accept
-# an invite). That split is intentional, not duplication.
+# user does to their OWN account (check status, accept an invite).
+# There is deliberately no self-service "become an admin" request
+# anywhere: the public has no way to discover or trigger anything here.
 admins_bp = Blueprint("admins", __name__)
 
 
@@ -81,6 +83,72 @@ def suspend_admin(admin_id):
     )
     db.session.commit()
     return jsonify(target.to_dict())
+
+
+# --- Registered users -> promote to admin/superadmin -------------------
+# This is the ONLY way an account becomes an admin without an explicit
+# invitation: a superadmin looks at who's already registered (Donor
+# records with a firebase_uid — i.e. real accounts, not one-time guest
+# donors) and promotes one directly. There is no request/approve step
+# because the superadmin IS the approval.
+
+@admins_bp.get("/api/admin/registered-users")
+@require_superadmin
+def list_registered_users():
+    query = Donor.query.filter(Donor.firebase_uid.isnot(None)).order_by(Donor.created_at.desc())
+    result = paginate_query(query)
+
+    items = []
+    for donor in result["items"]:
+        admin_record = AdminUser.query.filter_by(firebase_uid=donor.firebase_uid).first()
+        item = donor.to_admin_dict()
+        item["admin_role"] = admin_record.role if admin_record else None
+        item["admin_status"] = admin_record.status if admin_record else None
+        items.append(item)
+
+    return jsonify({"items": items, "pagination": result["pagination"]})
+
+
+@admins_bp.post("/api/admin/registered-users/<string:donor_id>/promote")
+@require_superadmin
+def promote_registered_user(donor_id):
+    donor = Donor.query.get(donor_id)
+    if donor is None or not donor.firebase_uid:
+        return jsonify({"error": "Registered user not found"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    role = payload.get("role")
+    if role not in AdminRole.ALL:
+        return jsonify({"error": f"role must be one of {list(AdminRole.ALL)}"}), 400
+
+    # Promoting to superadmin is the highest-privilege action in the
+    # system — require an explicit confirmation flag in the request
+    # body, not just a frontend "are you sure?" dialog the backend
+    # can't verify actually happened.
+    if role == AdminRole.SUPERADMIN and not payload.get("confirm"):
+        return jsonify({"error": "Promoting to superadmin requires confirm: true in the request body"}), 400
+
+    admin = AdminUser.query.filter_by(firebase_uid=donor.firebase_uid).first()
+    if admin is None:
+        admin = AdminUser(firebase_uid=donor.firebase_uid, email=donor.email)
+        db.session.add(admin)
+
+    admin.role = role
+    admin.status = AdminStatus.ACTIVE
+    db.session.flush()
+
+    record_audit(
+        admin_id=g.admin_user.id,
+        action="admin_promoted_registered_user",
+        resource_type="admin_user",
+        resource_id=admin.id,
+        description=f"Promoted {donor.email} to {role}",
+    )
+    db.session.commit()
+
+    email_service.send_admin_promotion(donor.email, role)
+
+    return jsonify(admin.to_dict())
 
 
 # --- Invitations (spec #72's preferred flow) ---------------------------

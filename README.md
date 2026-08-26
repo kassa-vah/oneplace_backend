@@ -8,19 +8,32 @@ Flask backend for the One Place donation platform.
   donate. A donor can ask to be shown anonymously on the cause page
   (`is_anonymous`) — that only affects public display, One Place still
   has their real record internally.
-- **Starting a subscription (recurring giving) requires registration.**
-  You must be signed in via Firebase to create one, because you need a
-  way to come back later and manage/cancel it.
-- **Registering an account is not the same as becoming an admin.**
-  Signing in with Firebase just makes you a donor. Asking to become an
-  admin is a separate, explicit step, and it stays `pending` until a
-  superadmin approves it.
+- **Starting a subscription (recurring giving) requires registration,**
+  consenting to the privacy policy, and passing reCAPTCHA. You must be
+  signed in via Firebase to create one, because you need a way to come
+  back later and manage/cancel it, and the consent + reCAPTCHA gate
+  keeps the sign-up form from being trivially scripted.
+- **There is no public "become an admin" anywhere.** Registering an
+  account (to start a subscription, for instance) never surfaces
+  anything admin-related, and there is no self-service request-access
+  route for a signed-in user to call. The general public has no way to
+  even discover the admin dashboard exists.
+- **Only a superadmin can turn someone into an admin**, one of two ways:
+  promoting an already-registered account directly (`GET
+  /api/admin/registered-users` → `POST .../promote`), or inviting a
+  specific email that isn't registered yet. Either way, the account is
+  active immediately — there's no separate approval step, because the
+  superadmin's action IS the approval. Promoting someone gets them a
+  congratulatory email (currently logged by the `EmailService` stub).
+- **Promoting to superadmin requires an explicit `confirm: true`** in
+  the request body — enforced server-side, not just a frontend "are you
+  sure?" dialog the backend has no way to verify actually happened.
 - **Admins manage causes/beneficiaries/donations day to day.** They can
-  create, edit, publish, and archive causes; they cannot approve or
-  suspend other admins.
-- **Superadmins are admins with one extra power**: approving, suspending,
-  and inviting other admins. That's the entire difference between the
-  two roles.
+  create, edit, publish, and archive causes; they cannot approve,
+  suspend, or promote other admins.
+- **Superadmins are admins with one extra power**: managing who else is
+  an admin (promote/approve/suspend/invite). That's the entire
+  difference between the two roles.
 
 ## Structure
 
@@ -105,18 +118,36 @@ flask run                 # http://localhost:5000
 ## Getting your first admin in
 
 ```bash
-flask bootstrap-superadmin --firebase-uid <uid> --email you@example.com
+flask bootstrap-superadmin --email you@example.com --password 'a-strong-password'
 ```
 
-`bootstrap-superadmin` is a CLI command, not an HTTP endpoint, on
-purpose — there's no public "become an admin" route. From then on:
+This creates a real Firebase account with that email/password (via the
+Firebase Admin SDK — nothing is stored in this app's own database
+except the resulting Firebase UID; Firebase remains the sole
+authentication authority, per spec #89) and marks it superadmin. If the
+Firebase account already exists, omit `--password` and pass
+`--firebase-uid <uid>` instead — the command will just promote it.
 
-- **Self-request flow**: a signed-in user calls `POST /api/auth/request-access`
-  → creates a `pending` AdminUser → a superadmin calls
-  `POST /api/admin/admins/<id>/approve`
-- **Invitation flow**: a superadmin calls `POST /api/admin/invitations` (returns
-  a one-time plaintext token) → the invitee calls
-  `POST /api/auth/invitations/accept` with that token while signed into Firebase
+`bootstrap-superadmin` is a CLI command, not an HTTP endpoint, and it's
+the ONLY way to seed the first superadmin — there is no public "become
+an admin" route anywhere in this app, and no self-service way for a
+signed-in user to request admin access either. Registering an account
+(for a subscription, say) never surfaces anything admin-related. From
+there, every further admin is added one of two ways, both of which
+only a superadmin can initiate:
+
+- **Promote an existing registered user**: `GET /api/admin/registered-users`
+  lists everyone who's signed up (e.g. to start a subscription) → a
+  superadmin calls `POST /api/admin/registered-users/<donor_id>/promote`
+  with `{"role": "admin"}` (or `{"role": "superadmin", "confirm": true}`
+  — promoting to superadmin requires that explicit confirm flag in the
+  request body, not just a frontend dialog). The promoted account is
+  active immediately, no separate approval step, and gets a
+  congratulatory email (currently logged by the `EmailService` stub).
+- **Invite someone who isn't registered yet**: a superadmin calls
+  `POST /api/admin/invitations` (returns a one-time plaintext token) →
+  the invitee calls `POST /api/auth/invitations/accept` with that
+  token while signed into Firebase.
 
 ## API surface
 
@@ -135,12 +166,16 @@ POST   /api/contact                              submit a contact message
 ### Requires Firebase sign-in, but NOT admin
 ```
 GET    /api/auth/me                             check your own status
-POST   /api/auth/request-access                   ask to become an admin
-POST   /api/auth/invitations/accept                 redeem an admin invite
-POST   /api/subscriptions                             start recurring giving — registration required
+POST   /api/auth/invitations/accept               redeem an admin invite
+POST   /api/subscriptions                            start recurring giving — registration + consent + reCAPTCHA required
 GET    /api/subscriptions/me                            your own subscriptions
 POST   /api/subscriptions/me/<id>/cancel                  cancel your own subscription
 ```
+`POST /api/subscriptions` requires `consent_version` (a string identifying
+which privacy policy version they agreed to) and `recaptcha_token` in the
+body — both are validated server-side before anything is created; a
+missing/invalid reCAPTCHA token fails the whole request. Consent is
+recorded on the `Donor` record (`consent_accepted_at`, `consent_version`).
 
 ### Requires an active AdminUser
 ```
@@ -158,14 +193,16 @@ POST   /api/admin/contact-messages/<id>/resolve
 
 ### Requires an active superadmin
 ```
-GET    /api/admin/admins             POST approve|suspend on /<id>
-GET    /api/admin/invitations          POST /revoke on /<id>
+GET    /api/admin/admins                    POST approve|suspend on /<id>
+GET    /api/admin/registered-users            everyone who's signed up (e.g. for a subscription)
+POST   /api/admin/registered-users/<id>/promote   {"role": "admin"} or {"role": "superadmin", "confirm": true}
+GET    /api/admin/invitations                      POST /revoke on /<id>
 POST   /api/admin/invitations
 ```
 
-Every create/update/publish/archive/refund/approve/suspend/invite writes
-an `AuditLog` row. A donor cancelling their *own* subscription does not —
-that's not an administrative action.
+Every create/update/publish/archive/refund/approve/suspend/invite/promote
+writes an `AuditLog` row. A donor cancelling their *own* subscription does
+not — that's not an administrative action.
 
 ## What's deliberately still a stub
 

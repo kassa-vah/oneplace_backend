@@ -22,18 +22,28 @@ def create_app(config_name: str | None = None) -> Flask:
 
     logging.basicConfig(level=logging.INFO)
 
+    if config_name != "testing" and not app.config.get("SQLALCHEMY_DATABASE_URI"):
+        raise RuntimeError(
+            "DATABASE_URL is not set. Copy .env.example to .env and fill in "
+            "DATABASE_URL with your Postgres connection string (from Supabase "
+            "or Render), then try again."
+        )
+
     db.init_app(app)
     migrate.init_app(app, db)
     cors.init_app(app, origins=app.config["CORS_ORIGINS"] or "*")
     email_service.init_app(app)
 
-    
-    from app import models  
+    # Import models so Alembic/SQLAlchemy registers all tables before
+    # migrations run.
+    from app import models  # noqa: F401
 
     if config_name != "testing":
         init_firebase(app)
 
-  
+    # One blueprint per resource — public/self-service and admin routes
+    # for the same resource live in the same file (see route comments
+    # for why), told apart by path and by @require_admin/@require_superadmin.
     from app.routes.health import health_bp
     from app.routes.causes import causes_bp
     from app.routes.beneficiaries import beneficiaries_bp

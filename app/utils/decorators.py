@@ -9,28 +9,49 @@ from app.models.admin import AdminUser
 
 
 def _extract_bearer_token() -> str | None:
+    """
+    Extract the Firebase ID token from the Authorization header.
+
+    Compatible with Python 3.8+.
+    Expected format:
+        Authorization: Bearer <firebase_id_token>
+    """
     header = request.headers.get("Authorization", "")
+
     if not header.startswith("Bearer "):
         return None
-    return header[len("Bearer "):].strip()
+
+    return header[7:].strip()
 
 
 def require_firebase_auth(fn):
-    """Verifies the Firebase ID token and attaches the decoded claims to
-    `g.firebase_user`. Does not by itself grant any admin privileges."""
+    """
+    Verifies the Firebase ID token and attaches the decoded claims to
+    `g.firebase_user`.
+
+    This decorator authenticates the Firebase user but does not grant
+    any admin privileges by itself.
+    """
 
     @wraps(fn)
     def wrapper(*args, **kwargs):
         token = _extract_bearer_token()
+
         if not token:
             return jsonify({"error": "Authentication required"}), 401
 
         try:
             g.firebase_user = verify_id_token(token)
+
         except InvalidFirebaseToken:
-            # Spec #92 — no internal detail leaks into the response.
-            current_app.logger.info("Rejected invalid Firebase token on %s", request.path)
-            return jsonify({"error": "Invalid or expired authentication token"}), 401
+            # Do not expose internal Firebase/token validation details.
+            current_app.logger.info(
+                "Rejected invalid Firebase token on %s",
+                request.path,
+            )
+            return jsonify(
+                {"error": "Invalid or expired authentication token"}
+            ), 401
 
         return fn(*args, **kwargs)
 
@@ -38,37 +59,58 @@ def require_firebase_auth(fn):
 
 
 def require_admin(fn):
-    """Requires a valid Firebase session AND an active AdminUser record
-    for that Firebase UID. Suspended/pending admins are rejected."""
+    """
+    Requires a valid Firebase session AND an active AdminUser record
+    associated with that Firebase UID.
+
+    Pending and suspended admins are rejected.
+    """
 
     @wraps(fn)
     @require_firebase_auth
     def wrapper(*args, **kwargs):
         firebase_uid = g.firebase_user["uid"]
-        admin = AdminUser.query.filter_by(firebase_uid=firebase_uid).first()
+
+        admin = AdminUser.query.filter_by(
+            firebase_uid=firebase_uid
+        ).first()
 
         if admin is None or not admin.is_active_admin():
             current_app.logger.info(
-                "Rejected admin-only route for firebase_uid=%s (no active admin record)",
+                "Rejected admin-only route for firebase_uid=%s "
+                "(no active admin record)",
                 firebase_uid,
             )
-            return jsonify({"error": "Administrator access required"}), 403
+
+            return jsonify(
+                {"error": "Administrator access required"}
+            ), 403
 
         g.admin_user = admin
+
         return fn(*args, **kwargs)
 
     return wrapper
 
 
 def require_superadmin(fn):
+    """
+    Requires the authenticated user to be an active superadmin.
+    """
+
     @wraps(fn)
     @require_admin
     def wrapper(*args, **kwargs):
         if not g.admin_user.is_superadmin():
             current_app.logger.info(
-                "Rejected superadmin-only route for admin_id=%s", g.admin_user.id
+                "Rejected superadmin-only route for admin_id=%s",
+                g.admin_user.id,
             )
-            return jsonify({"error": "Superadmin access required"}), 403
+
+            return jsonify(
+                {"error": "Superadmin access required"}
+            ), 403
+
         return fn(*args, **kwargs)
 
     return wrapper
