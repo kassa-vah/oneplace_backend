@@ -10,13 +10,7 @@ from app.models.admin import AdminUser, AdminRole, AdminStatus, AdminInvitation,
 from app.models.donation import Donor, normalize_email
 from app.services.email import email_service
 
-# Superadmin-only management of OTHER admins: approve, suspend, invite,
-# and — the main path now — promote an existing registered user
-# directly. Everything here is something a superadmin does TO someone
-# else's account — contrast with auth.py, which is what a signed-in
-# user does to their OWN account (check status, accept an invite).
-# There is deliberately no self-service "become an admin" request
-# anywhere: the public has no way to discover or trigger anything here.
+
 admins_bp = Blueprint("admins", __name__)
 
 
@@ -85,6 +79,35 @@ def suspend_admin(admin_id):
     return jsonify(target.to_dict())
 
 
+@admins_bp.post("/api/admin/admins/<string:admin_id>/dismiss")
+@require_superadmin
+def dismiss_admin(admin_id):
+    """Fully revokes admin access — unlike suspend (reversible; the row
+    stays and can be re-approved), dismiss deletes the AdminUser record
+    entirely. The person keeps their donor account; regaining admin
+    access requires being promoted again from scratch, not just
+    re-approved."""
+    target = AdminUser.query.get(admin_id)
+    if target is None:
+        return jsonify({"error": "Admin not found"}), 404
+
+    if target.id == g.admin_user.id:
+        return jsonify({"error": "You cannot dismiss your own account"}), 400
+
+    email = target.email
+
+    record_audit(
+        admin_id=g.admin_user.id,
+        action="admin_dismissed_admin",
+        resource_type="admin_user",
+        resource_id=target.id,
+        description=f"Dismissed admin access for {email}",
+    )
+    db.session.delete(target)
+    db.session.commit()
+    return jsonify({"success": True, "email": email})
+
+
 # --- Registered users -> promote to admin/superadmin -------------------
 # This is the ONLY way an account becomes an admin without an explicit
 # invitation: a superadmin looks at who's already registered (Donor
@@ -121,14 +144,20 @@ def promote_registered_user(donor_id):
     if role not in AdminRole.ALL:
         return jsonify({"error": f"role must be one of {list(AdminRole.ALL)}"}), 400
 
+    admin = AdminUser.query.filter_by(firebase_uid=donor.firebase_uid).first()
+
     # Promoting to superadmin is the highest-privilege action in the
     # system — require an explicit confirmation flag in the request
     # body, not just a frontend "are you sure?" dialog the backend
-    # can't verify actually happened.
-    if role == AdminRole.SUPERADMIN and not payload.get("confirm"):
-        return jsonify({"error": "Promoting to superadmin requires confirm: true in the request body"}), 400
+    # can't verify actually happened. It's also a two-step ladder: you
+    # can't jump straight from donor to superadmin — you have to already
+    # be an active admin first.
+    if role == AdminRole.SUPERADMIN:
+        if not payload.get("confirm"):
+            return jsonify({"error": "Promoting to superadmin requires confirm: true in the request body"}), 400
+        if admin is None or admin.role != AdminRole.ADMIN or admin.status != AdminStatus.ACTIVE:
+            return jsonify({"error": "Only an existing, active admin can be promoted to superadmin"}), 400
 
-    admin = AdminUser.query.filter_by(firebase_uid=donor.firebase_uid).first()
     if admin is None:
         admin = AdminUser(firebase_uid=donor.firebase_uid, email=donor.email)
         db.session.add(admin)
