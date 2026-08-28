@@ -1,3 +1,6 @@
+# ============================================================
+# FILE BELONGS AT:  app/__init__.py
+# ============================================================
 from __future__ import annotations
 
 import os
@@ -48,7 +51,6 @@ def create_app(config_name: str | None = None) -> Flask:
     from app.routes.causes import causes_bp
     from app.routes.beneficiaries import beneficiaries_bp
     from app.routes.donations import donations_bp
-    from app.routes.subscriptions import subscriptions_bp
     from app.routes.auth import auth_bp
     from app.routes.admins import admins_bp
     from app.routes.content import content_bp
@@ -58,7 +60,6 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(causes_bp)
     app.register_blueprint(beneficiaries_bp)
     app.register_blueprint(donations_bp)
-    app.register_blueprint(subscriptions_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(admins_bp)
     app.register_blueprint(content_bp)

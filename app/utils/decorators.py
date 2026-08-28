@@ -60,10 +60,17 @@ def require_firebase_auth(fn):
 
 def require_admin(fn):
     """
-    Requires a valid Firebase session AND an active AdminUser record
-    associated with that Firebase UID.
+    Requires:
+      1. A valid Firebase session
+      2. An active AdminUser record associated with that Firebase UID
+      3. A completed OTP (second-factor) verification, still within its
+         session window (see AdminUser.otp_verified_until)
 
-    Pending and suspended admins are rejected.
+    Pending and suspended admins are rejected. An active admin who
+    hasn't completed the OTP step (or whose OTP session has expired)
+    gets a distinct `otp_required` flag in the 401 body so the frontend
+    knows to show the OTP screen rather than treating this as a full
+    logout.
     """
 
     @wraps(fn)
@@ -85,6 +92,17 @@ def require_admin(fn):
             return jsonify(
                 {"error": "Administrator access required"}
             ), 403
+
+        if not admin.is_otp_verified():
+            current_app.logger.info(
+                "Rejected admin-only route for admin_id=%s "
+                "(OTP verification required or expired)",
+                admin.id,
+            )
+
+            return jsonify(
+                {"error": "OTP verification required", "otp_required": True}
+            ), 401
 
         g.admin_user = admin
 
