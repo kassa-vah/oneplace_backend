@@ -476,6 +476,39 @@ class EmailService:
             subject     ="Reset Your Password — One Place, Inc.",
             html_content=_wrap(body),
         )
+    def send_newsletter_email(self, *, to_email: str, subject: str, message: str, unsubscribe_url: str) -> bool:
+        """
+        Send an admin-composed newsletter (or test send) to a single
+        recipient. `message` is plain text as typed by the admin —
+        escaped and turned into paragraphs here, never trusted as HTML.
+        Always includes a prominent, mandatory unsubscribe link.
+        """
+        import html as _html
 
+        escaped_lines = [_html.escape(line) for line in message.split("\n")]
+        message_html = "".join(
+            f'<p style="{_P}">{line}</p>' if line.strip() else '<div style="height:8px;"></div>'
+            for line in escaped_lines
+        )
+
+        body = f"""
+        {_tag_pill("Newsletter")}
+        <h2 style="{_H2}">{_html.escape(subject)}</h2>
+        {message_html}
+
+        {_DIVIDER}
+        <div style="text-align:center; margin:8px 0 4px;">
+          <a href="{unsubscribe_url}" style="
+            font-family:'DM Sans', Arial, sans-serif;
+            font-size:13px; color:#8a8478; text-decoration:underline;
+          ">Unsubscribe from these emails</a>
+        </div>
+        """
+        return self._send(
+            to_email    =to_email,
+            to_name     =to_email.split("@", 1)[0],
+            subject     =subject,
+            html_content=_wrap(body),
+        )
 
 email_service = EmailService()

@@ -1,4 +1,3 @@
-
 # ============================================================
 # FILE BELONGS AT:  app/config.py
 # ============================================================
@@ -17,6 +16,10 @@ class Config:
     )
 
     BREVO_API_KEY = os.environ.get("BREVO_API_KEY")
+
+    # Public site URL — used to build links that go out in emails
+    # (e.g. the newsletter unsubscribe link). No trailing slash.
+    FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
 
     CORS_ORIGINS = [
         origin.strip()
@@ -60,4 +63,3 @@ config_by_name = {
     "production": ProductionConfig,
     "testing": TestingConfig,
 }
-

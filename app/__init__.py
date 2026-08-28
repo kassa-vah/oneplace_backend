@@ -55,6 +55,7 @@ def create_app(config_name: str | None = None) -> Flask:
     from app.routes.admins import admins_bp
     from app.routes.content import content_bp
     from app.routes.metrics import metrics_bp
+    from app.routes.newsletter import newsletter_bp
 
     app.register_blueprint(health_bp)
     app.register_blueprint(causes_bp)
@@ -64,6 +65,7 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(admins_bp)
     app.register_blueprint(content_bp)
     app.register_blueprint(metrics_bp)
+    app.register_blueprint(newsletter_bp)
 
     register_error_handlers(app)
 

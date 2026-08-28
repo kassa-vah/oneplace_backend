@@ -17,3 +17,4 @@ from app.models.donation import (  # noqa: F401
     normalize_email,
 )
 from app.models.content import ContactMessage  # noqa: F401
+from app.models.newsletter import NewsletterSubscriber, NewsletterCampaign  # noqa: F401
