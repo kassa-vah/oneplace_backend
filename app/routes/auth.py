@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, request, g
 
 from app.extensions import db
-from app.utils.decorators import require_firebase_auth
+from app.utils.decorators import require_firebase_auth, OTP_SESSION_MINUTES
 from app.utils.security import hash_token, verify_token, generate_otp_code
 from app.models.admin import AdminUser
 from app.services.email import email_service
@@ -12,7 +12,6 @@ from app.services.email import email_service
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
 OTP_TTL_MINUTES = 10
-OTP_SESSION_HOURS = 12
 OTP_MAX_ATTEMPTS = 5
 OTP_RESEND_COOLDOWN_SECONDS = 30
 
@@ -43,7 +42,13 @@ def get_current_identity():
 
     There is no path here for a non-admin to become one — becoming an
     admin only happens via a superadmin promoting an existing
-    registration (see admins.py). This endpoint just reports status."""
+    registration (see admins.py). This endpoint just reports status.
+
+    Note: unlike admin-only routes, /me does NOT go through
+    require_admin, so it does not renew the OTP session window. That's
+    intentional — the frontend polls this defensively (see AuthPage's
+    redirectAfterAuth) and polling shouldn't itself keep an otherwise-
+    idle session alive."""
     admin = AdminUser.query.filter_by(firebase_uid=g.firebase_user["uid"]).first()
     if admin is None:
         return jsonify({"is_admin": False, "status": None})
@@ -92,8 +97,9 @@ def request_otp():
 def verify_otp():
     """
     Checks the submitted code against the stored hash. On success, opens
-    an OTP-verified session window (OTP_SESSION_HOURS) that require_admin
-    checks on every subsequent admin request.
+    an OTP-verified session window (OTP_SESSION_MINUTES) that require_admin
+    checks — and slides forward on activity — on every subsequent admin
+    request.
     """
     payload = request.get_json(silent=True) or {}
     code = (payload.get("otp") or "").strip()
@@ -128,7 +134,30 @@ def verify_otp():
         }), 401
 
     admin.clear_otp_challenge()
-    admin.otp_verified_until = now + timedelta(hours=OTP_SESSION_HOURS)
+    admin.otp_verified_until = now + timedelta(minutes=OTP_SESSION_MINUTES)
     db.session.commit()
 
     return jsonify({"otp_required": False, **admin.to_dict()})
+
+
+@auth_bp.post("/logout")
+@require_firebase_auth
+def logout():
+    """
+    Ends the OTP-verified admin session server-side. This is what makes
+    logout actually mean something: without it, a Bearer token obtained
+    before logout (e.g. cached, or a token that hasn't expired yet on
+    Firebase's side) could still pass require_admin's OTP check, because
+    that check only looks at otp_verified_until in the DB — it has no
+    idea the frontend called firebase signOut(). Clearing the window here
+    closes that gap immediately, independent of whatever the client does.
+
+    Safe to call even if the caller isn't an admin (e.g. an in-between
+    state) — it's a no-op in that case rather than an error, since the
+    goal is just "make sure nothing admin-scoped is left open."
+    """
+    admin = AdminUser.query.filter_by(firebase_uid=g.firebase_user["uid"]).first()
+    if admin is not None:
+        admin.end_otp_session()
+        db.session.commit()
+    return jsonify({"message": "Logged out"})

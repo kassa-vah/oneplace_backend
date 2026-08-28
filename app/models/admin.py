@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.extensions import db
 from app.models.base import TimestampMixin, uuid_pk_column
@@ -69,7 +69,10 @@ class AdminUser(TimestampMixin, db.Model):
     otp_attempts = db.Column(db.Integer, nullable=False, default=0)
     otp_last_sent_at = db.Column(db.DateTime(timezone=True), nullable=True)
     # Once verified, the admin session stays OTP-verified until this
-    # timestamp — checked by require_admin on every admin-only request.
+    # timestamp — checked (and slid forward on activity) by require_admin
+    # on every admin-only request. A short TTL here only means "inactive
+    # sessions expire quickly" because touch_otp_session() keeps pushing
+    # it forward as long as requests keep coming in.
     otp_verified_until = db.Column(db.DateTime(timezone=True), nullable=True)
 
     def is_active_admin(self) -> bool:
@@ -81,6 +84,20 @@ class AdminUser(TimestampMixin, db.Model):
     def is_otp_verified(self) -> bool:
         verified_until = _aware(self.otp_verified_until)
         return bool(verified_until) and verified_until > datetime.now(timezone.utc)
+
+    def touch_otp_session(self, minutes: int) -> None:
+        """Slide the OTP-verified window forward on activity. Called by
+        require_admin on every authenticated admin request so the
+        session expires from inactivity (X minutes with no requests),
+        not from a fixed clock started at login. Caller is responsible
+        for committing."""
+        self.otp_verified_until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+
+    def end_otp_session(self) -> None:
+        """Explicit logout — immediately invalidates the OTP-verified
+        window regardless of how much time was left on it. Caller is
+        responsible for committing."""
+        self.otp_verified_until = None
 
     def clear_otp_challenge(self) -> None:
         """Clear a pending (unverified) OTP code — used on success, expiry, or lockout."""
