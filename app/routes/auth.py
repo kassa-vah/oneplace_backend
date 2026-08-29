@@ -6,6 +6,7 @@ from app.extensions import db
 from app.utils.decorators import require_firebase_auth, OTP_SESSION_MINUTES
 from app.utils.security import hash_token, verify_token, generate_otp_code
 from app.models.admin import AdminUser
+from app.models.donation import Donor
 from app.services.email import email_service
 
 
@@ -28,6 +29,53 @@ def _aware(dt):
     if dt is not None and dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+@auth_bp.post("/register")
+@require_firebase_auth
+def register():
+    """
+    Fired the moment a Firebase signup succeeds — this IS registration,
+    full stop. Not a consent step, not something gated behind onboarding
+    screens. Without this call, a brand-new Firebase account never gets
+    a row here at all, so it never shows up in
+    GET /api/admins/registrations and a superadmin has nothing to
+    promote. AuthPage calls this right after signUp() resolves, before
+    the WELCOME/CONSENT steps even render.
+
+    Backed by the Donor table because that's what list_registrations
+    already queries (WHERE firebase_uid IS NOT NULL) — this route just
+    exposes it as what it actually is: registering an admin candidate,
+    not tracking a donor.
+
+    Idempotent: find_or_create_registered looks up by firebase_uid
+    first, then by email, before creating anything — a retried request
+    (flaky network, double-click) reuses the same row instead of
+    erroring or duplicating it. Always 201 on success, whether the row
+    was just created or already existed, since "you are registered" is
+    true either way.
+    """
+    firebase_user = g.firebase_user
+    email = firebase_user.get("email")
+    if not email:
+        return jsonify({"error": "Firebase account has no email on record"}), 400
+
+    name = firebase_user.get("name") or ""
+    first_name, _, last_name = name.partition(" ")
+
+    donor = Donor.find_or_create_registered(
+        firebase_uid=firebase_user["uid"],
+        email=email,
+        first_name=first_name or None,
+        last_name=last_name or None,
+    )
+    db.session.commit()
+
+    return jsonify({
+        "id": donor.id,
+        "email": donor.email,
+        "registered_at": donor.created_at.isoformat(),
+    }), 201
 
 
 @auth_bp.get("/me")

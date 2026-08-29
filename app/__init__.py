@@ -47,6 +47,13 @@ def create_app(config_name: str | None = None) -> Flask:
     # One blueprint per resource — public/self-service and admin routes
     # for the same resource live in the same file (see route comments
     # for why), told apart by path and by @require_admin/@require_superadmin.
+    #
+    # Registration (POST /api/auth/register) lives in auth_bp, not a
+    # separate donors blueprint — it's fired the moment Firebase signup
+    # succeeds and is what makes an account visible to
+    # GET /api/admins/registrations (admins_bp) for a superadmin to
+    # promote. It's backed by the Donor table internally, but there's
+    # no donor-facing blueprint exposed here.
     from app.routes.health import health_bp
     from app.routes.causes import causes_bp
     from app.routes.beneficiaries import beneficiaries_bp

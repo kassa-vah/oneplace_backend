@@ -10,20 +10,7 @@ from app.models.admin import AdminUser, AdminRole, AdminStatus, record_audit
 from app.models.donation import Donor
 from app.services.email import email_service
 
-# Managing OTHER admins: approve, suspend, and — the only path now —
-# promote an existing registered account directly. There used to be a
-# separate email-invitation system alongside this (token generation,
-# expiry, a whole acceptance flow); it's gone, because this promote
-# flow already covers "log in, get managed, get appointed admin, get
-# promoted to superadmin" with no extra machinery. There is
-# deliberately no self-service "become an admin" request anywhere: the
-# public has no way to discover or trigger anything here.
-#
-# Access split: any active admin can VIEW who's an admin and who's a
-# candidate for promotion (list_admins, list_registrations) — but only
-# a superadmin can actually change anything (approve, suspend,
-# promote). Read routes use @require_admin; every mutating route below
-# stays on @require_superadmin.
+
 admins_bp = Blueprint("admins", __name__)
 
 
