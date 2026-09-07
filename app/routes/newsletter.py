@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from flask import Blueprint, request, jsonify, current_app
 
-from app.extensions import db
+from app.extensions import db, limiter
 from app.utils.decorators import require_admin
 from app.models.admin import record_audit
 from app.models.newsletter import (
@@ -26,6 +26,7 @@ newsletter_bp = Blueprint("newsletter", __name__)
 # ── Public: subscribe ──────────────────────────────────────────────────────
 
 @newsletter_bp.route("/api/newsletter/subscribe", methods=["POST"])
+@limiter.limit("10 per hour")
 def subscribe():
     data = request.get_json(silent=True) or {}
     email = normalize_email(data.get("email", ""))
@@ -57,7 +58,13 @@ def subscribe():
 # ── Public: unsubscribe ─────────────────────────────────────────────────────
 
 @newsletter_bp.route("/api/newsletter/unsubscribe/<token>", methods=["GET"])
+@limiter.limit("20 per hour")
 def unsubscribe(token):
+    """Rate-limited (unlike a plain content read) because the token
+    lives in the URL path — this is exactly the kind of route someone
+    could try to enumerate/guess tokens against. 20/hour per IP is
+    plenty for a real recipient clicking their own link, but blunts a
+    brute-force sweep."""
     subscriber = NewsletterSubscriber.query.filter_by(unsubscribe_token=token).first()
 
     if subscriber is None:
@@ -75,6 +82,7 @@ def unsubscribe(token):
 
 @newsletter_bp.route("/api/admin/newsletter/subscribers", methods=["GET"])
 @require_admin
+@limiter.limit("60 per minute")
 def list_subscribers():
     query = NewsletterSubscriber.query
 
@@ -107,6 +115,7 @@ def list_subscribers():
 
 @newsletter_bp.route("/api/admin/newsletter/stats", methods=["GET"])
 @require_admin
+@limiter.limit("60 per minute")
 def newsletter_stats():
     total = NewsletterSubscriber.query.count()
     active = NewsletterSubscriber.query.filter_by(is_active=True).count()
@@ -127,6 +136,7 @@ def newsletter_stats():
 
 @newsletter_bp.route("/api/admin/newsletter/subscribers/<subscriber_id>", methods=["PATCH"])
 @require_admin
+@limiter.limit("60 per hour")
 def update_subscriber(subscriber_id):
     subscriber = NewsletterSubscriber.query.get(subscriber_id)
     if subscriber is None:
@@ -159,6 +169,7 @@ def update_subscriber(subscriber_id):
 
 @newsletter_bp.route("/api/admin/newsletter/subscribers/<subscriber_id>", methods=["DELETE"])
 @require_admin
+@limiter.limit("20 per hour")
 def delete_subscriber(subscriber_id):
     subscriber = NewsletterSubscriber.query.get(subscriber_id)
     if subscriber is None:
@@ -181,7 +192,12 @@ def delete_subscriber(subscriber_id):
 
 @newsletter_bp.route("/api/admin/newsletter/send", methods=["POST"])
 @require_admin
+@limiter.limit("5 per day")
 def send_newsletter():
+    """Fans out to every active subscriber via Brevo — by far the most
+    consequential route in this file (real emails, real recipients, a
+    real audit trail either way). Capped hard at 5/day so a mistake or
+    a compromised admin session can't blast the whole list on repeat."""
     data = request.get_json(silent=True) or {}
     subject = (data.get("subject") or "").strip()
     message = (data.get("message") or "").strip()
@@ -259,6 +275,7 @@ def send_newsletter():
 
 @newsletter_bp.route("/api/admin/newsletter/test", methods=["POST"])
 @require_admin
+@limiter.limit("20 per hour")
 def send_test_newsletter():
     data = request.get_json(silent=True) or {}
     subject = (data.get("subject") or "").strip()

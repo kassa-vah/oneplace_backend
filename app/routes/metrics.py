@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from flask import Blueprint, jsonify
 from sqlalchemy import func
 
-from app.extensions import db
+from app.extensions import db, limiter
 from app.utils.decorators import require_admin
 from app.models.donation import Donation, DonationStatus
 from app.models.cause import Cause
@@ -16,12 +16,17 @@ metrics_bp = Blueprint("metrics", __name__, url_prefix="/api/admin/metrics")
 
 @metrics_bp.get("/overview")
 @require_admin
+@limiter.limit("60 per minute")
 def overview():
     """
     Totals computed from admin-entered Donation records at request
     time — never from a cached counter. No recurring-revenue figure
     here anymore: SwipeSimple handles monthly giving entirely outside
     this backend, so there's nothing here to compute it from.
+
+    Rate-limited the same as other admin read endpoints — this one
+    runs a handful of aggregate queries (including a join + group by
+    for top causes) per call, so it's a bit heavier than a plain list.
     """
     now = datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)

@@ -3,7 +3,7 @@
 # ============================================================
 from flask import Blueprint, jsonify, request, g
 
-from app.extensions import db
+from app.extensions import db, limiter
 from app.utils.decorators import require_admin, require_superadmin
 from app.utils.pagination import paginate_query
 from app.models.admin import AdminUser, AdminRole, AdminStatus, record_audit
@@ -30,6 +30,7 @@ def _send_best_effort(fn, *args, **kwargs):
 
 @admins_bp.get("/api/admin/admins")
 @require_admin
+@limiter.limit("60 per minute")
 def list_admins():
     query = AdminUser.query
 
@@ -52,6 +53,7 @@ def list_admins():
 
 @admins_bp.post("/api/admin/admins/<string:admin_id>/approve")
 @require_superadmin
+@limiter.limit("30 per hour")
 def approve_admin(admin_id):
     target = AdminUser.query.get(admin_id)
     if target is None:
@@ -79,6 +81,7 @@ def approve_admin(admin_id):
 
 @admins_bp.post("/api/admin/admins/<string:admin_id>/suspend")
 @require_superadmin
+@limiter.limit("30 per hour")
 def suspend_admin(admin_id):
     target = AdminUser.query.get(admin_id)
     if target is None:
@@ -107,19 +110,7 @@ def suspend_admin(admin_id):
     return jsonify(target.to_dict())
 
 
-# --- Registrations -> promote to admin/superadmin ----------------------
-# This is the ONLY way an account becomes an admin without an explicit
-# invitation: a superadmin looks at who's already registered (Donor
-# records with a firebase_uid — i.e. real accounts, not one-time guest
-# donors) and promotes one directly. There is no request/approve step
-# because the superadmin IS the approval.
-#
-# Path is /api/admins/registrations (plural "admins") rather than
-# /api/admin/... like the rest of this file — that's a deliberate
-# mismatch with the rest of the backend's naming, kept ONLY because
-# it's the exact contract the frontend (RegistrationsManager) already
-# calls. Don't "fix" this to /api/admin/registrations without updating
-# the frontend to match.
+
 
 def _registration_dict(donor, admin_record):
     """Shape matches RegistrationsManager's expected row exactly:
@@ -140,6 +131,7 @@ def _registration_dict(donor, admin_record):
 
 @admins_bp.get("/api/admins/registrations")
 @require_admin
+@limiter.limit("60 per minute")
 def list_registrations():
     donors = Donor.query.filter(Donor.firebase_uid.isnot(None)).order_by(Donor.created_at.desc()).all()
 
@@ -155,6 +147,7 @@ def list_registrations():
 
 @admins_bp.post("/api/admins/registrations/<string:donor_id>/promote")
 @require_superadmin
+@limiter.limit("30 per hour")
 def promote_registration(donor_id):
     donor = Donor.query.get(donor_id)
     if donor is None or not donor.firebase_uid:
@@ -165,14 +158,6 @@ def promote_registration(donor_id):
     if role not in AdminRole.ALL:
         return jsonify({"error": f"role must be one of {list(AdminRole.ALL)}"}), 400
 
-    # NOTE: no server-side confirm requirement here, unlike an earlier
-    # version of this endpoint — the frontend's ConfirmDialog already
-    # gates this client-side ("Yes, promote"), and the contract this
-    # route matches sends exactly { role }. If you want defense in
-    # depth against a forged request bypassing that dialog, add back:
-    #   if role == AdminRole.SUPERADMIN and not payload.get("confirm"):
-    #       return jsonify({"error": "..."}), 400
-    # and have the frontend send confirm: true alongside role.
 
     admin = AdminUser.query.filter_by(firebase_uid=donor.firebase_uid).first()
     if admin is None:

@@ -1,11 +1,12 @@
 from flask import Blueprint, jsonify
 
-from app.extensions import db
+from app.extensions import db, limiter
 
 health_bp = Blueprint("health", __name__)
 
 
 @health_bp.get("/health")
+@limiter.exempt
 def health():
     db_status = "ok"
     try:

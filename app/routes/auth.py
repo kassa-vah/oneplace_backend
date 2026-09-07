@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, jsonify, request, g
 
-from app.extensions import db
+from app.extensions import db, limiter
 from app.utils.decorators import require_firebase_auth, OTP_SESSION_MINUTES
 from app.utils.security import hash_token, verify_token, generate_otp_code
 from app.models.admin import AdminUser
@@ -33,6 +33,7 @@ def _aware(dt):
 
 @auth_bp.post("/register")
 @require_firebase_auth
+@limiter.limit("10 per hour")
 def register():
     """
     Fired the moment a Firebase signup succeeds — this IS registration,
@@ -54,6 +55,11 @@ def register():
     erroring or duplicating it. Always 201 on success, whether the row
     was just created or already existed, since "you are registered" is
     true either way.
+
+    Rate-limited (10/hour, keyed by Firebase UID) — this is an
+    unauthenticated-in-effect entry point for anyone with a valid
+    Firebase token, so it's the cheapest place for someone to hammer
+    the DB with retried signups.
     """
     firebase_user = g.firebase_user
     email = firebase_user.get("email")
@@ -80,6 +86,7 @@ def register():
 
 @auth_bp.get("/me")
 @require_firebase_auth
+@limiter.limit("60 per minute")
 def get_current_identity():
     """Lets the frontend check 'am I an admin, and what state is my
     request in' without a separate round trip. `otp_required` tells the
@@ -96,7 +103,12 @@ def get_current_identity():
     require_admin, so it does not renew the OTP session window. That's
     intentional — the frontend polls this defensively (see AuthPage's
     redirectAfterAuth) and polling shouldn't itself keep an otherwise-
-    idle session alive."""
+    idle session alive.
+
+    Rate-limited generously (60/minute) since this is a defensively-
+    polled endpoint — the limit exists to catch a runaway polling loop
+    or abuse, not to interfere with normal use.
+    """
     admin = AdminUser.query.filter_by(firebase_uid=g.firebase_user["uid"]).first()
     if admin is None:
         return jsonify({"is_admin": False, "status": None})
@@ -111,11 +123,17 @@ def get_current_identity():
 
 @auth_bp.post("/otp/request")
 @require_firebase_auth
+@limiter.limit("5 per hour")
 def request_otp():
     """
     Mails a fresh 6-digit code to an active admin's email, once they've
     already passed Firebase sign-in. The code is only ever stored as a
     hash and expires after OTP_TTL_MINUTES.
+
+    Rate-limited on top of the existing OTP_RESEND_COOLDOWN_SECONDS
+    cooldown — the cooldown stops rapid-fire resends, but a caller could
+    still wait it out and grind through it dozens of times an hour,
+    which is what this caps (and it protects Brevo send volume/cost).
     """
     admin = AdminUser.query.filter_by(firebase_uid=g.firebase_user["uid"]).first()
     if admin is None or not admin.is_active_admin():
@@ -142,12 +160,20 @@ def request_otp():
 
 @auth_bp.post("/otp/verify")
 @require_firebase_auth
+@limiter.limit("6 per day")
 def verify_otp():
     """
     Checks the submitted code against the stored hash. On success, opens
     an OTP-verified session window (OTP_SESSION_MINUTES) that require_admin
     checks — and slides forward on activity — on every subsequent admin
     request.
+
+    Rate-limited to 6/day (keyed by Firebase UID) — this is effectively
+    the "complete login" step, so it gets the strict daily cap. It
+    stacks with OTP_MAX_ATTEMPTS (5 wrong guesses burns the current
+    code), so a caller can't burn through a fresh code every few
+    minutes all day; they get 6 completion attempts total, successful
+    or not.
     """
     payload = request.get_json(silent=True) or {}
     code = (payload.get("otp") or "").strip()
@@ -190,6 +216,7 @@ def verify_otp():
 
 @auth_bp.post("/logout")
 @require_firebase_auth
+@limiter.limit("30 per hour")
 def logout():
     """
     Ends the OTP-verified admin session server-side. This is what makes

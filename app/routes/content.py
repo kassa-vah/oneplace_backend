@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from flask import Blueprint, jsonify, request, g
 
-from app.extensions import db
+from app.extensions import db, limiter
 from app.utils.decorators import require_admin
 from app.utils.pagination import paginate_query
 from app.models.content import Blog, ALLOWED_CATEGORIES, MAX_PHOTOS, slugify
@@ -44,6 +44,7 @@ def _validate_photos(photos):
 # ---------------- Public ----------------
 
 @content_bp.get("/api/blogs")
+@limiter.limit("100 per hour")
 def list_blogs():
     query = Blog.query
 
@@ -65,6 +66,7 @@ def list_blogs():
 
 
 @content_bp.get("/api/blogs/<string:blog_id>")
+@limiter.limit("200 per hour")
 def get_blog(blog_id):
     blog = Blog.query.get(blog_id)
     if blog is None:
@@ -76,6 +78,7 @@ def get_blog(blog_id):
 
 @content_bp.post("/api/admin/blogs")
 @require_admin
+@limiter.limit("30 per hour")
 def create_blog():
     payload = request.get_json(silent=True) or {}
     title = (payload.get("title") or "").strip()
@@ -117,6 +120,7 @@ def create_blog():
 
 @content_bp.get("/api/admin/blogs")
 @require_admin
+@limiter.limit("60 per minute")
 def list_admin_blogs():
     query = Blog.query
 
@@ -137,6 +141,7 @@ def list_admin_blogs():
 
 @content_bp.get("/api/admin/blogs/<string:blog_id>")
 @require_admin
+@limiter.limit("60 per minute")
 def get_admin_blog(blog_id):
     blog = Blog.query.get(blog_id)
     if blog is None:
@@ -146,6 +151,7 @@ def get_admin_blog(blog_id):
 
 @content_bp.patch("/api/admin/blogs/<string:blog_id>")
 @require_admin
+@limiter.limit("60 per hour")
 def update_blog(blog_id):
     blog = Blog.query.get(blog_id)
     if blog is None:
@@ -196,6 +202,7 @@ def update_blog(blog_id):
 
 @content_bp.delete("/api/admin/blogs/<string:blog_id>")
 @require_admin
+@limiter.limit("20 per hour")
 def delete_blog(blog_id):
     blog = Blog.query.get(blog_id)
     if blog is None:

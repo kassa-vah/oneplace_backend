@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, request, g, Response
 
-from app.extensions import db
+from app.extensions import db, limiter
 from app.utils.decorators import require_admin, require_firebase_auth
 from app.utils.pagination import paginate_query
 from app.models.cause import Cause
@@ -21,6 +21,7 @@ donations_bp = Blueprint("donations", __name__)
 
 @donations_bp.post("/api/donors/consent")
 @require_firebase_auth
+@limiter.limit("10 per hour")
 def record_donor_consent():
     """
     Fired right after Firebase sign-up/sign-in — this is now the ONLY
@@ -28,6 +29,10 @@ def record_donor_consent():
     is handled entirely by SwipeSimple, outside this backend), so it
     doubles as the "you're now a registration a superadmin can see and
     promote" touchpoint. Body: { agreed: true, consent_version? }.
+
+    Rate-limited the same way as /api/auth/register (10/hour, keyed by
+    Firebase UID) — same reasoning: it's the cheapest entry point for
+    anyone holding a valid Firebase token to hit repeatedly.
     """
     payload = request.get_json(silent=True) or {}
     email = g.firebase_user.get("email")
@@ -71,6 +76,7 @@ def _apply_donation_filters(query):
 
 @donations_bp.get("/api/admin/donations")
 @require_admin
+@limiter.limit("60 per minute")
 def list_donations_admin():
     query, error = _apply_donation_filters(Donation.query)
     if error:
@@ -89,6 +95,7 @@ def list_donations_admin():
 
 @donations_bp.post("/api/admin/donations")
 @require_admin
+@limiter.limit("30 per hour")
 def create_donation_admin():
     """An admin logs a donation that already happened on SwipeSimple —
     this never creates a pending/in-progress record, because by the
@@ -148,6 +155,7 @@ def create_donation_admin():
 
 @donations_bp.patch("/api/admin/donations/<string:donation_id>")
 @require_admin
+@limiter.limit("60 per hour")
 def update_donation_admin(donation_id):
     """Correcting a manually-entered record — a typo'd amount, a fixed
     donor name, etc. Not for changing status; use the refund endpoint
@@ -185,6 +193,7 @@ def update_donation_admin(donation_id):
 
 @donations_bp.post("/api/admin/donations/<string:donation_id>/refund")
 @require_admin
+@limiter.limit("20 per hour")
 def refund_donation_admin(donation_id):
     donation = Donation.query.get(donation_id)
     if donation is None:
@@ -209,7 +218,12 @@ def refund_donation_admin(donation_id):
 
 @donations_bp.get("/api/admin/donations/export")
 @require_admin
+@limiter.limit("10 per hour")
 def export_donations():
+    """Pulls up to 10,000 rows and builds a CSV in memory — the
+    heaviest route in this file by far, and the one that would do the
+    most damage (both to the DB and as a data-exfiltration vector) if
+    hammered, hence the tightest limit here."""
     query, error = _apply_donation_filters(Donation.query)
     if error:
         return jsonify(error[0]), error[1]
