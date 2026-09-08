@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import logging
 
-from flask import Flask
 from dotenv import load_dotenv
+
+load_dotenv()
+
+from flask import Flask
 
 from app.config import config_by_name
 from app.extensions import db, migrate, cors, limiter
@@ -14,8 +17,6 @@ from app.services.email import email_service
 
 
 def create_app(config_name: str | None = None) -> Flask:
-    load_dotenv()
-
     config_name = config_name or os.environ.get("FLASK_ENV", "development")
     app = Flask(__name__)
     app.config.from_object(config_by_name[config_name])
