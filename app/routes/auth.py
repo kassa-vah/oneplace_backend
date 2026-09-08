@@ -1,11 +1,15 @@
+import base64
+import io
 from datetime import datetime, timedelta, timezone
 
+import pyotp
+import qrcode
 from flask import Blueprint, jsonify, request, g
 
 from app.extensions import db, limiter
-from app.utils.decorators import require_firebase_auth, OTP_SESSION_MINUTES
+from app.utils.decorators import require_admin, require_firebase_auth, OTP_SESSION_MINUTES
 from app.utils.security import hash_token, verify_token, generate_otp_code
-from app.models.admin import AdminUser
+from app.models.admin import AdminUser, record_audit
 from app.models.donation import Donor
 from app.services.email import email_service
 
@@ -15,6 +19,10 @@ auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 OTP_TTL_MINUTES = 10
 OTP_MAX_ATTEMPTS = 5
 OTP_RESEND_COOLDOWN_SECONDS = 30
+
+# Issuer name shown inside the authenticator app next to the account —
+# purely cosmetic, doesn't affect verification.
+TOTP_ISSUER_NAME = "One Place, Inc."
 
 
 def _aware(dt):
@@ -29,6 +37,33 @@ def _aware(dt):
     if dt is not None and dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _build_totp_qr_base64(secret: str, email: str) -> str:
+    """Generate a TOTP provisioning URI and return it as a base64-encoded PNG QR code."""
+    uri = pyotp.totp.TOTP(secret).provisioning_uri(name=email, issuer_name=TOTP_ISSUER_NAME)
+    img = qrcode.make(uri)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _verify_totp_code(admin: AdminUser, code: str) -> bool:
+    """Verify a 6-digit TOTP code against an admin's ALREADY-CONFIRMED
+    secret. Deliberately requires totp_enabled — during initial setup
+    (before confirmation) totp_confirm() below verifies the raw secret
+    directly instead, since totp_enabled is still False at that point."""
+    if not admin.totp_secret or not admin.totp_enabled:
+        return False
+    return pyotp.TOTP(admin.totp_secret).verify(code, valid_window=1)
+
+
+def _open_otp_session(admin: AdminUser) -> None:
+    """Shared by both login-gate verify routes (email OTP and TOTP
+    login) — opens the same otp_verified_until window either way, so
+    require_admin treats a session opened by an authenticator code
+    identically to one opened by an emailed code."""
+    admin.otp_verified_until = datetime.now(timezone.utc) + timedelta(minutes=OTP_SESSION_MINUTES)
 
 
 @auth_bp.post("/register")
@@ -90,10 +125,16 @@ def register():
 def get_current_identity():
     """Lets the frontend check 'am I an admin, and what state is my
     request in' without a separate round trip. `otp_required` tells the
-    frontend whether to show the OTP screen before granting an admin
-    session — an active admin who hasn't completed OTP (or whose OTP
-    session has expired) still gets is_admin: true, since they ARE an
-    admin, just not yet fully signed in.
+    frontend whether to show the per-login OTP screen (email code, or
+    authenticator code once TOTP is set up — the frontend decides which
+    based on how the admin signed in). Separately, `totp_setup_required`
+    tells the frontend whether the one-time, unskippable authenticator
+    setup step still needs to happen — this stays true across every
+    login until the admin confirms TOTP once, then stays false forever
+    after, regardless of OTP session state. An active admin who hasn't
+    completed OTP (or whose OTP session has expired) still gets
+    is_admin: true, since they ARE an admin, just not yet fully signed
+    in.
 
     There is no path here for a non-admin to become one — becoming an
     admin only happens via a superadmin promoting an existing
@@ -117,13 +158,14 @@ def get_current_identity():
     return jsonify({
         "is_admin": is_active,
         "otp_required": is_active and not admin.is_otp_verified(),
+        "totp_setup_required": is_active and not admin.totp_enabled,
         **admin.to_dict(),
     })
 
 
 @auth_bp.post("/otp/request")
 @require_firebase_auth
-@limiter.limit("5 per hour")
+@limiter.limit("10 per hour")
 def request_otp():
     """
     Mails a fresh 6-digit code to an active admin's email, once they've
@@ -208,10 +250,185 @@ def verify_otp():
         }), 401
 
     admin.clear_otp_challenge()
-    admin.otp_verified_until = now + timedelta(minutes=OTP_SESSION_MINUTES)
+    _open_otp_session(admin)
     db.session.commit()
 
-    return jsonify({"otp_required": False, **admin.to_dict()})
+    return jsonify({
+        "otp_required": False,
+        "totp_setup_required": not admin.totp_enabled,
+        **admin.to_dict(),
+    })
+
+
+@auth_bp.post("/totp/verify")
+@require_firebase_auth
+@limiter.limit("20 per hour")
+def totp_login_verify():
+    """
+    Per-login session gate for admins who've already completed TOTP
+    setup (totp_enabled) and are signing in via a method the frontend
+    treats as authenticator-gated rather than email-OTP-gated —
+    currently: Google. Checks the submitted 6-digit authenticator code
+    and, on success, opens the exact same otp_verified_until session
+    window that email OTP verification opens (see _open_otp_session),
+    so require_admin can't tell the difference afterward.
+
+    Deliberately a separate endpoint from /otp/verify (email code)
+    rather than a shared one — the two need very different rate limits
+    (this one is the normal per-login path for authenticator-gated
+    admins, so it can't be capped as tightly as the 6/day email-OTP
+    limit), and the frontend already knows which one to call based on
+    how the admin signed in.
+
+    Requires only basic Firebase auth (not @require_admin) — same as
+    /otp/verify — because this IS what opens the admin session; there's
+    no OTP-verified session yet to require.
+    """
+    payload = request.get_json(silent=True) or {}
+    code = str(payload.get("code") or "").strip()
+    if len(code) != 6 or not code.isdigit():
+        return jsonify({"error": "code must be exactly 6 digits"}), 400
+
+    admin = AdminUser.query.filter_by(firebase_uid=g.firebase_user["uid"]).first()
+    if admin is None or not admin.is_active_admin():
+        return jsonify({"error": "Administrator access required"}), 403
+    if not admin.totp_enabled:
+        return jsonify({"error": "Authenticator app is not set up on this account yet"}), 400
+
+    if not _verify_totp_code(admin, code):
+        return jsonify({"error": "Incorrect code"}), 401
+
+    _open_otp_session(admin)
+    db.session.commit()
+
+    return jsonify({
+        "otp_required": False,
+        "totp_setup_required": not admin.totp_enabled,
+        **admin.to_dict(),
+    })
+
+
+@auth_bp.post("/totp/setup")
+@require_admin
+@limiter.limit("10 per hour")
+def totp_setup():
+    """
+    Generates a fresh TOTP secret for the authenticated admin and returns:
+      - secret    (base32 string, shown as a manual-entry backup)
+      - qr_code   (base64-encoded PNG — render as <img src="data:image/png;base64,...">)
+      - totp_uri  (otpauth:// URI — optional, for manual entry)
+
+    The secret is stored immediately but totp_enabled stays False until
+    the admin calls POST /api/auth/totp/confirm with a valid code,
+    proving they actually scanned the QR (not just that a secret
+    exists). This is the mandatory onboarding security step — the
+    frontend keeps the admin on this screen (per totp_setup_required
+    from /me) until confirmation succeeds.
+
+    Gated by @require_admin rather than bare Firebase auth: setup only
+    makes sense once an admin has an active, OTP-verified session, same
+    as every other admin-only action.
+    """
+    admin = g.admin_user
+
+    secret = pyotp.random_base32()
+    admin.totp_secret = secret
+    admin.totp_enabled = False  # not active until confirmed
+    db.session.commit()
+
+    qr_b64 = _build_totp_qr_base64(secret, admin.email)
+    totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(name=admin.email, issuer_name=TOTP_ISSUER_NAME)
+
+    return jsonify({
+        "secret": secret,
+        "qr_code": qr_b64,
+        "totp_uri": totp_uri,
+    })
+
+
+@auth_bp.post("/totp/confirm")
+@require_admin
+@limiter.limit("10 per hour")
+def totp_confirm():
+    """
+    Activates TOTP for the authenticated admin by verifying the first
+    code entered from their authenticator app.
+
+    Body: { "code": "123456" }
+
+    Flips totp_enabled to True on success — the one and only thing that
+    turns totp_setup_required (from /me) to False, permanently, for
+    this admin. This is the "approval" the frontend's onboarding gate
+    is waiting on before it unlocks the dashboard.
+    """
+    admin = g.admin_user
+    payload = request.get_json(silent=True) or {}
+    code = str(payload.get("code") or "").strip()
+
+    if len(code) != 6 or not code.isdigit():
+        return jsonify({"error": "code must be exactly 6 digits"}), 400
+
+    if not admin.totp_secret:
+        return jsonify({"error": "No TOTP secret found — call POST /api/auth/totp/setup first"}), 400
+
+    # Verified against the raw secret directly (not _verify_totp_code)
+    # because totp_enabled is still False at this point in the flow.
+    if not pyotp.TOTP(admin.totp_secret).verify(code, valid_window=1):
+        return jsonify({
+            "error": "Code is incorrect or expired. Make sure your device's time is accurate and try again."
+        }), 400
+
+    admin.totp_enabled = True
+    record_audit(
+        admin_id=admin.id,
+        action="admin_enabled_totp",
+        resource_type="admin_user",
+        resource_id=admin.id,
+        description=f"{admin.email} linked an authenticator app",
+    )
+    db.session.commit()
+
+    return jsonify({"totp_enabled": True})
+
+
+@auth_bp.delete("/totp/disable")
+@require_admin
+@limiter.limit("5 per hour")
+def totp_disable():
+    """
+    Removes TOTP from the authenticated admin's account. Requires the
+    current TOTP code as confirmation — so a stolen/replayed Bearer
+    token alone can't strip MFA off an account without also having the
+    admin's actual authenticator app.
+
+    Body: { "code": "123456" }
+
+    Note: this puts the admin back into totp_setup_required territory
+    (per /me) — the onboarding gate will block dashboard access again
+    until they set TOTP up again.
+    """
+    admin = g.admin_user
+    payload = request.get_json(silent=True) or {}
+    code = str(payload.get("code") or "").strip()
+
+    if not admin.totp_enabled:
+        return jsonify({"error": "TOTP is not enabled on this account"}), 400
+    if len(code) != 6 or not code.isdigit():
+        return jsonify({"error": "Provide your current authenticator code to confirm"}), 400
+    if not _verify_totp_code(admin, code):
+        return jsonify({"error": "Incorrect code — TOTP not disabled"}), 400
+
+    admin.clear_totp()
+    record_audit(
+        admin_id=admin.id,
+        action="admin_disabled_totp",
+        resource_type="admin_user",
+        resource_id=admin.id,
+        description=f"{admin.email} removed their authenticator app",
+    )
+    db.session.commit()
+
+    return jsonify({"totp_enabled": False})
 
 
 @auth_bp.post("/logout")

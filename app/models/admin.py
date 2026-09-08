@@ -50,6 +50,17 @@ class AdminUser(TimestampMixin, db.Model):
     after a Firebase sign-in succeeds, the admin must also enter a
     mailed one-time code before `require_admin` will grant access to
     any admin route. Only the code's hash is ever stored.
+
+    TOTP fields implement a SEPARATE, one-time mandatory setup gate —
+    every admin must link an authenticator app once (during onboarding,
+    right after a superadmin promotes them) before the frontend lets
+    them past onboarding into the dashboard. Unlike the OTP fields
+    above, this isn't a per-login session window; totp_enabled just
+    stays true forever once confirmed, and GET /api/auth/me reports
+    totp_setup_required so the frontend knows whether to block on it.
+    totp_secret is stored plaintext (not hashed) because pyotp needs
+    the raw value to verify codes — this is the same trade-off any
+    TOTP implementation makes.
     """
 
     __tablename__ = "admin_users"
@@ -63,7 +74,7 @@ class AdminUser(TimestampMixin, db.Model):
     role = db.Column(db.String(20), nullable=False, default=AdminRole.ADMIN)
     status = db.Column(db.String(20), nullable=False, default=AdminStatus.PENDING)
 
-    # ── OTP (second factor) ────────────────────────────────────────────
+    # ── OTP (per-login second factor, unchanged) ───────────────────────
     otp_code_hash = db.Column(db.String(128), nullable=True)
     otp_expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
     otp_attempts = db.Column(db.Integer, nullable=False, default=0)
@@ -74,6 +85,10 @@ class AdminUser(TimestampMixin, db.Model):
     # sessions expire quickly" because touch_otp_session() keeps pushing
     # it forward as long as requests keep coming in.
     otp_verified_until = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    # ── TOTP (one-time mandatory onboarding gate) ──────────────────────
+    totp_secret = db.Column(db.String(64), nullable=True, default=None)
+    totp_enabled = db.Column(db.Boolean, nullable=False, default=False)
 
     def is_active_admin(self) -> bool:
         return self.status == AdminStatus.ACTIVE
@@ -105,6 +120,12 @@ class AdminUser(TimestampMixin, db.Model):
         self.otp_expires_at = None
         self.otp_attempts = 0
 
+    def clear_totp(self) -> None:
+        """Fully removes TOTP — used by the disable endpoint. Caller is
+        responsible for committing."""
+        self.totp_secret = None
+        self.totp_enabled = False
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -112,6 +133,7 @@ class AdminUser(TimestampMixin, db.Model):
             "name": self.name,
             "role": self.role,
             "status": self.status,
+            "totp_enabled": self.totp_enabled,
             "created_at": self.created_at.isoformat(),
         }
 
