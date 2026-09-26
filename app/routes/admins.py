@@ -39,6 +39,12 @@ def list_admins():
         if status not in AdminStatus.ALL:
             return jsonify({"error": f"Invalid status filter '{status}'"}), 400
         query = query.filter_by(status=status)
+    else:
+        # Rejected registrations are real AdminUser rows now (see
+        # reject_registration below) but were never actual admins —
+        # keep them out of the default admin list. Still reachable via
+        # an explicit ?status=rejected filter if ever needed.
+        query = query.filter(AdminUser.status != AdminStatus.REJECTED)
 
     query = query.order_by(AdminUser.created_at.desc())
     result = paginate_query(query)

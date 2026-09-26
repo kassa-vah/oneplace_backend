@@ -17,8 +17,14 @@ class AdminStatus:
     PENDING = "pending"
     ACTIVE = "active"
     SUSPENDED = "suspended"
+    # A dismissed admin-access request (see routes/admins.py:
+    # reject_registration). Not a real admin state — these rows exist
+    # only to remember "don't show this donor in the pending
+    # registrations queue anymore" and are filtered out of list_admins
+    # by default.
+    REJECTED = "rejected"
 
-    ALL = (PENDING, ACTIVE, SUSPENDED)
+    ALL = (PENDING, ACTIVE, SUSPENDED, REJECTED)
 
 
 def _aware(dt):
