@@ -117,7 +117,12 @@ def _registration_dict(donor, admin_record):
     { id, name, email, registered_at, role, status }. role/status are
     "donor"/"registered" until a superadmin promotes them — this lets
     the frontend compare role ordinally (donor < admin < superadmin)
-    to decide which promote buttons to hide."""
+    to decide which promote buttons to hide.
+
+    A rejected registration also has no admin_record shape of its own
+    at the AdminUser.role level (role stays whatever AdminRole allows),
+    so rejection is carried on AdminStatus instead — see
+    AdminStatus.REJECTED below and list_registrations' filtering."""
     name = " ".join(filter(None, [donor.first_name, donor.last_name])) or None
     return {
         "id": donor.id,
@@ -138,6 +143,14 @@ def list_registrations():
     items = []
     for donor in donors:
         admin_record = AdminUser.query.filter_by(firebase_uid=donor.firebase_uid).first()
+
+        # A rejected registration keeps its Donor/Firebase account fully
+        # intact (they can still donate, still log in as themselves) —
+        # it's dismissed from the admin-request queue only. Requires
+        # AdminStatus.REJECTED — see reject_registration below.
+        if admin_record is not None and admin_record.status == AdminStatus.REJECTED:
+            continue
+
         items.append(_registration_dict(donor, admin_record))
 
     # Frontend expects a plain array, not the {items, pagination} envelope
@@ -182,3 +195,52 @@ def promote_registration(donor_id):
     # Same shape as list_registrations's rows — the frontend patches
     # this straight into local state after promoting.
     return jsonify(_registration_dict(donor, admin))
+
+
+@admins_bp.delete("/api/admins/registrations/<string:donor_id>")
+@require_superadmin
+@limiter.limit("30 per hour")
+def reject_registration(donor_id):
+    """Dismiss a pending admin-access request without touching the
+    person's underlying Donor/Firebase account — they keep whatever
+    donor access they already had, they just stop showing up in the
+    pending-registrations queue and cannot be promoted via the old
+    request unless they register again.
+
+    NOTE: this assumes app/models/admin.py's AdminStatus defines a
+    REJECTED value (e.g. AdminStatus.REJECTED = "rejected") and that
+    it's included in AdminStatus.ALL. If it isn't defined yet, add it
+    there before deploying this route — send me that file and I'll
+    confirm the exact change needed.
+    """
+    donor = Donor.query.get(donor_id)
+    if donor is None or not donor.firebase_uid:
+        return jsonify({"error": "Registration not found"}), 404
+
+    admin_record = AdminUser.query.filter_by(firebase_uid=donor.firebase_uid).first()
+
+    if admin_record is not None and admin_record.status != AdminStatus.REJECTED:
+        # They're already an active/suspended/pending admin — this
+        # route is only for donor-role, never-promoted requests.
+        # Use suspend/approve for anyone who already has an AdminUser row.
+        return jsonify({
+            "error": "This account already has admin history — use suspend instead of reject."
+        }), 400
+
+    if admin_record is None:
+        admin_record = AdminUser(firebase_uid=donor.firebase_uid, email=donor.email)
+        db.session.add(admin_record)
+
+    admin_record.status = AdminStatus.REJECTED
+    db.session.flush()
+
+    record_audit(
+        admin_id=g.admin_user.id,
+        action="admin_rejected_registration",
+        resource_type="admin_user",
+        resource_id=admin_record.id,
+        description=f"Rejected admin-access registration for {donor.email}",
+    )
+    db.session.commit()
+
+    return jsonify({"ok": True, "id": donor.id})
