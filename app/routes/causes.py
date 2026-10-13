@@ -17,6 +17,8 @@ from app.models.admin import record_audit
 # what is, underneath, one resource.
 causes_bp = Blueprint("causes", __name__)
 
+MAX_GALLERY = 4  # cover image + 4 = 5 photos total
+
 
 def _parse_decimal(value, field_name):
     """Manual numeric admin input (raised_amount, goal_amount) — reject
@@ -26,6 +28,25 @@ def _parse_decimal(value, field_name):
         return Decimal(str(value))
     except (InvalidOperation, TypeError):
         raise ValueError(f"{field_name} must be a number")
+
+
+def _parse_gallery(value):
+    """Gallery is optional. Accept None/missing as empty; otherwise it must
+    be a list of at most MAX_GALLERY non-empty URL strings."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("gallery must be a list of image URLs")
+    cleaned = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("gallery must contain only image URLs")
+        item = item.strip()
+        if item:
+            cleaned.append(item)
+    if len(cleaned) > MAX_GALLERY:
+        raise ValueError(f"gallery can have at most {MAX_GALLERY} photos")
+    return cleaned
 
 
 # --- Public ---------------------------------------------------------
@@ -107,6 +128,11 @@ def create_cause():
     except (TypeError, ValueError):
         return jsonify({"error": "donors_count must be an integer"}), 400
 
+    try:
+        gallery = _parse_gallery(payload.get("gallery"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
     base_slug = slugify(title)
     slug = base_slug
     suffix = 2
@@ -122,6 +148,7 @@ def create_cause():
         description=payload.get("description"),
         beneficiary_id=beneficiary_id,
         cover_image_url=payload.get("cover_image_url"),
+        gallery=gallery,
         goal_amount=payload.get("goal_amount"),
         currency=payload.get("currency", "KES"),
         status=CauseStatus.DRAFT,
@@ -175,11 +202,18 @@ def update_cause(cause_id):
         except (TypeError, ValueError):
             return jsonify({"error": "donors_count must be an integer"}), 400
 
+    if "gallery" in payload:
+        try:
+            payload["gallery"] = _parse_gallery(payload["gallery"])
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
     editable_fields = (
         "title",
         "description",
         "beneficiary_id",
         "cover_image_url",
+        "gallery",
         "goal_amount",
         "currency",
         "featured",
