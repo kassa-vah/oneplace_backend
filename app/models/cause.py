@@ -39,6 +39,11 @@ class Cause(TimestampMixin, db.Model):
     # migration is instant on existing rows; serializers treat NULL as [].
     gallery = db.Column(db.JSON, nullable=True)
 
+    # SwipeSimple checkout link for this specific cause. One per cause —
+    # the public donate button reads this directly off the cause record,
+    # never a shared/default link, so each cause must carry its own.
+    payment_link = db.Column(db.String(1000), nullable=True)
+
     status = db.Column(
         db.String(20), nullable=False, default=CauseStatus.DRAFT, index=True
     )
@@ -80,6 +85,7 @@ class Cause(TimestampMixin, db.Model):
             "beneficiary": self.beneficiary.to_public_dict() if self.beneficiary else None,
             "cover_image_url": self.cover_image_url,
             "gallery": self.gallery or [],
+            "payment_link": self.payment_link,
             "featured": self.featured,
             "tag": self.tag,
             "location": self.location,

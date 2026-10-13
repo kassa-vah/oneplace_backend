@@ -5,3 +5,4 @@ __pycache__/
 instance/
 firebase-service-account.json
 *.db
+seed_superadmin.py

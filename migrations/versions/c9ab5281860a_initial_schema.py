@@ -1,8 +1,8 @@
-"""initial schema: causes, beneficiaries, donors, donations, payment transactions, webhook events, subscriptions, admin users, invitations, audit logs, contact messages
+"""initial schema
 
-Revision ID: 6dc68473d4a4
+Revision ID: c9ab5281860a
 Revises: 
-Create Date: 2026-08-25 08:39:12.942625
+Create Date: 2026-08-28 11:35:27.274205
 
 """
 from alembic import op
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = '6dc68473d4a4'
+revision = 'c9ab5281860a'
 down_revision = None
 branch_labels = None
 depends_on = None
@@ -69,6 +69,8 @@ def upgrade():
     sa.Column('email_receipts', sa.Boolean(), nullable=False),
     sa.Column('marketing_emails', sa.Boolean(), nullable=False),
     sa.Column('impact_updates', sa.Boolean(), nullable=False),
+    sa.Column('consent_accepted_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('consent_version', sa.String(length=20), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
     sa.PrimaryKeyConstraint('id')
@@ -76,37 +78,6 @@ def upgrade():
     with op.batch_alter_table('donors', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_donors_email'), ['email'], unique=True)
         batch_op.create_index(batch_op.f('ix_donors_firebase_uid'), ['firebase_uid'], unique=True)
-
-    op.create_table('payment_webhook_events',
-    sa.Column('id', sa.String(length=36), nullable=False),
-    sa.Column('provider', sa.String(length=30), nullable=False),
-    sa.Column('event_id', sa.String(length=255), nullable=False),
-    sa.Column('event_type', sa.String(length=100), nullable=True),
-    sa.Column('processed', sa.Boolean(), nullable=False),
-    sa.Column('processing_error', sa.Text(), nullable=True),
-    sa.Column('processed_at', sa.DateTime(timezone=True), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
-    sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('provider', 'event_id', name='uq_webhook_provider_event')
-    )
-    op.create_table('admin_invitations',
-    sa.Column('id', sa.String(length=36), nullable=False),
-    sa.Column('email', sa.String(length=255), nullable=False),
-    sa.Column('role', sa.String(length=20), nullable=False),
-    sa.Column('token_hash', sa.String(length=128), nullable=False),
-    sa.Column('status', sa.String(length=20), nullable=False),
-    sa.Column('invited_by', sa.String(length=36), nullable=True),
-    sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('accepted_at', sa.DateTime(timezone=True), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
-    sa.ForeignKeyConstraint(['invited_by'], ['admin_users.id'], ),
-    sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('token_hash')
-    )
-    with op.batch_alter_table('admin_invitations', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_admin_invitations_email'), ['email'], unique=False)
 
     op.create_table('audit_logs',
     sa.Column('id', sa.String(length=36), nullable=False),
@@ -133,13 +104,21 @@ def upgrade():
     sa.Column('status', sa.String(length=20), nullable=False),
     sa.Column('featured', sa.Boolean(), nullable=False),
     sa.Column('display_order', sa.Integer(), nullable=False),
+    sa.Column('tag', sa.String(length=100), nullable=True),
+    sa.Column('location', sa.String(length=255), nullable=True),
+    sa.Column('story', sa.Text(), nullable=True),
+    sa.Column('need', sa.Text(), nullable=True),
     sa.Column('goal_amount', sa.Numeric(precision=12, scale=2), nullable=True),
+    sa.Column('raised_amount', sa.Numeric(precision=12, scale=2), nullable=False),
+    sa.Column('donors_count', sa.Integer(), nullable=False),
     sa.Column('currency', sa.String(length=3), nullable=False),
     sa.Column('archived_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint('currency IS NOT NULL', name='ck_cause_currency_not_null'),
+    sa.CheckConstraint('donors_count >= 0', name='ck_cause_donors_count_nonnegative'),
     sa.CheckConstraint('goal_amount IS NULL OR goal_amount > 0', name='ck_cause_goal_amount_positive'),
+    sa.CheckConstraint('raised_amount >= 0', name='ck_cause_raised_amount_nonnegative'),
     sa.ForeignKeyConstraint(['beneficiary_id'], ['beneficiaries.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
@@ -148,103 +127,43 @@ def upgrade():
         batch_op.create_index(batch_op.f('ix_causes_slug'), ['slug'], unique=True)
         batch_op.create_index(batch_op.f('ix_causes_status'), ['status'], unique=False)
 
-    op.create_table('subscriptions',
-    sa.Column('id', sa.String(length=36), nullable=False),
-    sa.Column('donor_id', sa.String(length=36), nullable=False),
-    sa.Column('cause_id', sa.String(length=36), nullable=False),
-    sa.Column('amount', sa.Numeric(precision=12, scale=2), nullable=False),
-    sa.Column('currency', sa.String(length=3), nullable=False),
-    sa.Column('interval', sa.String(length=20), nullable=False),
-    sa.Column('status', sa.String(length=20), nullable=False),
-    sa.Column('provider', sa.String(length=30), nullable=True),
-    sa.Column('provider_subscription_id', sa.String(length=255), nullable=True),
-    sa.Column('started_at', sa.DateTime(timezone=True), nullable=True),
-    sa.Column('cancelled_at', sa.DateTime(timezone=True), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
-    sa.CheckConstraint('amount > 0', name='ck_subscription_amount_positive'),
-    sa.ForeignKeyConstraint(['cause_id'], ['causes.id'], ),
-    sa.ForeignKeyConstraint(['donor_id'], ['donors.id'], ),
-    sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('provider_subscription_id')
-    )
-    with op.batch_alter_table('subscriptions', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_subscriptions_cause_id'), ['cause_id'], unique=False)
-        batch_op.create_index(batch_op.f('ix_subscriptions_donor_id'), ['donor_id'], unique=False)
-        batch_op.create_index(batch_op.f('ix_subscriptions_status'), ['status'], unique=False)
-
     op.create_table('donations',
     sa.Column('id', sa.String(length=36), nullable=False),
-    sa.Column('donor_id', sa.String(length=36), nullable=False),
     sa.Column('cause_id', sa.String(length=36), nullable=False),
-    sa.Column('subscription_id', sa.String(length=36), nullable=True),
+    sa.Column('donor_name', sa.String(length=255), nullable=True),
+    sa.Column('donor_email', sa.String(length=255), nullable=True),
     sa.Column('amount', sa.Numeric(precision=12, scale=2), nullable=False),
     sa.Column('currency', sa.String(length=3), nullable=False),
+    sa.Column('method', sa.String(length=50), nullable=True),
     sa.Column('status', sa.String(length=20), nullable=False),
     sa.Column('is_anonymous', sa.Boolean(), nullable=False),
-    sa.Column('donor_message', sa.String(length=1000), nullable=True),
-    sa.Column('payment_provider', sa.String(length=30), nullable=True),
-    sa.Column('idempotency_key', sa.String(length=128), nullable=True),
+    sa.Column('note', sa.String(length=1000), nullable=True),
     sa.Column('refund_reason', sa.String(length=500), nullable=True),
-    sa.Column('refund_reference', sa.String(length=255), nullable=True),
     sa.Column('refunded_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('recorded_by_admin_id', sa.String(length=36), nullable=True),
+    sa.Column('occurred_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint('amount > 0', name='ck_donation_amount_positive'),
     sa.CheckConstraint('currency IS NOT NULL', name='ck_donation_currency_not_null'),
     sa.ForeignKeyConstraint(['cause_id'], ['causes.id'], ),
-    sa.ForeignKeyConstraint(['donor_id'], ['donors.id'], ),
-    sa.ForeignKeyConstraint(['subscription_id'], ['subscriptions.id'], ),
-    sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('idempotency_key')
+    sa.ForeignKeyConstraint(['recorded_by_admin_id'], ['admin_users.id'], ),
+    sa.PrimaryKeyConstraint('id')
     )
     with op.batch_alter_table('donations', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_donations_cause_id'), ['cause_id'], unique=False)
-        batch_op.create_index(batch_op.f('ix_donations_donor_id'), ['donor_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_donations_status'), ['status'], unique=False)
-        batch_op.create_index(batch_op.f('ix_donations_subscription_id'), ['subscription_id'], unique=False)
-
-    op.create_table('payment_transactions',
-    sa.Column('id', sa.String(length=36), nullable=False),
-    sa.Column('donation_id', sa.String(length=36), nullable=False),
-    sa.Column('provider', sa.String(length=30), nullable=False),
-    sa.Column('provider_transaction_id', sa.String(length=255), nullable=True),
-    sa.Column('provider_reference', sa.String(length=255), nullable=True),
-    sa.Column('amount', sa.Numeric(precision=12, scale=2), nullable=False),
-    sa.Column('currency', sa.String(length=3), nullable=False),
-    sa.Column('status', sa.String(length=20), nullable=False),
-    sa.Column('raw_event_reference', sa.String(length=255), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
-    sa.ForeignKeyConstraint(['donation_id'], ['donations.id'], ),
-    sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('provider', 'provider_transaction_id', name='uq_provider_transaction_id')
-    )
-    with op.batch_alter_table('payment_transactions', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_payment_transactions_donation_id'), ['donation_id'], unique=False)
 
     # ### end Alembic commands ###
 
 
 def downgrade():
     # ### commands auto generated by Alembic - please adjust! ###
-    with op.batch_alter_table('payment_transactions', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_payment_transactions_donation_id'))
-
-    op.drop_table('payment_transactions')
     with op.batch_alter_table('donations', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_donations_subscription_id'))
         batch_op.drop_index(batch_op.f('ix_donations_status'))
-        batch_op.drop_index(batch_op.f('ix_donations_donor_id'))
         batch_op.drop_index(batch_op.f('ix_donations_cause_id'))
 
     op.drop_table('donations')
-    with op.batch_alter_table('subscriptions', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_subscriptions_status'))
-        batch_op.drop_index(batch_op.f('ix_subscriptions_donor_id'))
-        batch_op.drop_index(batch_op.f('ix_subscriptions_cause_id'))
-
-    op.drop_table('subscriptions')
     with op.batch_alter_table('causes', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_causes_status'))
         batch_op.drop_index(batch_op.f('ix_causes_slug'))
@@ -255,11 +174,6 @@ def downgrade():
         batch_op.drop_index(batch_op.f('ix_audit_logs_admin_id'))
 
     op.drop_table('audit_logs')
-    with op.batch_alter_table('admin_invitations', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_admin_invitations_email'))
-
-    op.drop_table('admin_invitations')
-    op.drop_table('payment_webhook_events')
     with op.batch_alter_table('donors', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_donors_firebase_uid'))
         batch_op.drop_index(batch_op.f('ix_donors_email'))

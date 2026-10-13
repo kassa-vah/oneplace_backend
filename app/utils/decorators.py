@@ -4,8 +4,14 @@ from functools import wraps
 
 from flask import g, request, jsonify, current_app
 
+from app.extensions import db
 from app.services.firebase import verify_id_token, InvalidFirebaseToken
 from app.models.admin import AdminUser
+
+# How long an OTP-verified admin session survives with no admin-route
+# activity. require_admin renews this on every successful request, so
+# in practice this is an inactivity timeout, not a fixed session length.
+OTP_SESSION_MINUTES = 15
 
 
 def _extract_bearer_token() -> str | None:
@@ -60,10 +66,22 @@ def require_firebase_auth(fn):
 
 def require_admin(fn):
     """
-    Requires a valid Firebase session AND an active AdminUser record
-    associated with that Firebase UID.
+    Requires:
+      1. A valid Firebase session
+      2. An active AdminUser record associated with that Firebase UID
+      3. A completed OTP (second-factor) verification, still within its
+         session window (see AdminUser.otp_verified_until)
 
-    Pending and suspended admins are rejected.
+    Pending and suspended admins are rejected. An active admin who
+    hasn't completed the OTP step (or whose OTP session has expired)
+    gets a distinct `otp_required` flag in the 401 body so the frontend
+    knows to show the OTP screen rather than treating this as a full
+    logout.
+
+    On every successful pass, the OTP window is slid forward by
+    OTP_SESSION_MINUTES — this is what makes the session an
+    inactivity timeout rather than a flat TTL from the moment of
+    verification.
     """
 
     @wraps(fn)
@@ -85,6 +103,20 @@ def require_admin(fn):
             return jsonify(
                 {"error": "Administrator access required"}
             ), 403
+
+        if not admin.is_otp_verified():
+            current_app.logger.info(
+                "Rejected admin-only route for admin_id=%s "
+                "(OTP verification required or expired)",
+                admin.id,
+            )
+
+            return jsonify(
+                {"error": "OTP verification required", "otp_required": True}
+            ), 401
+
+        admin.touch_otp_session(OTP_SESSION_MINUTES)
+        db.session.commit()
 
         g.admin_user = admin
 

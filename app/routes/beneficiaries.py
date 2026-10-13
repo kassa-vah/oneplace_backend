@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request, g
 
-from app.extensions import db
+from app.extensions import db, limiter
 from app.utils.decorators import require_admin
 from app.utils.pagination import paginate_query
 from app.models.beneficiary import Beneficiary, BeneficiaryStatus
@@ -12,6 +12,7 @@ beneficiaries_bp = Blueprint("beneficiaries", __name__)
 # --- Public ---------------------------------------------------------
 
 @beneficiaries_bp.get("/api/beneficiaries")
+@limiter.limit("100 per hour")
 def list_beneficiaries():
     query = Beneficiary.query.filter_by(status=BeneficiaryStatus.ACTIVE).order_by(
         Beneficiary.created_at.desc()
@@ -26,6 +27,7 @@ def list_beneficiaries():
 
 
 @beneficiaries_bp.get("/api/beneficiaries/<string:beneficiary_id>")
+@limiter.limit("200 per hour")
 def get_beneficiary(beneficiary_id):
     beneficiary = Beneficiary.query.filter_by(
         id=beneficiary_id, status=BeneficiaryStatus.ACTIVE
@@ -39,6 +41,7 @@ def get_beneficiary(beneficiary_id):
 
 @beneficiaries_bp.get("/api/admin/beneficiaries")
 @require_admin
+@limiter.limit("60 per minute")
 def list_beneficiaries_admin():
     query = Beneficiary.query
 
@@ -60,6 +63,7 @@ def list_beneficiaries_admin():
 
 @beneficiaries_bp.post("/api/admin/beneficiaries")
 @require_admin
+@limiter.limit("30 per hour")
 def create_beneficiary():
     payload = request.get_json(silent=True) or {}
     name = (payload.get("name") or "").strip()
@@ -87,6 +91,7 @@ def create_beneficiary():
 
 @beneficiaries_bp.patch("/api/admin/beneficiaries/<string:beneficiary_id>")
 @require_admin
+@limiter.limit("60 per hour")
 def update_beneficiary(beneficiary_id):
     beneficiary = Beneficiary.query.get(beneficiary_id)
     if beneficiary is None:
@@ -109,6 +114,7 @@ def update_beneficiary(beneficiary_id):
 
 @beneficiaries_bp.post("/api/admin/beneficiaries/<string:beneficiary_id>/archive")
 @require_admin
+@limiter.limit("30 per hour")
 def archive_beneficiary(beneficiary_id):
     """Soft-archive only — causes may still reference this beneficiary
     historically (same principle as Cause archiving, spec #82)."""

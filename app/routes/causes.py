@@ -3,7 +3,7 @@ from decimal import Decimal, InvalidOperation
 
 from flask import Blueprint, jsonify, request, g
 
-from app.extensions import db
+from app.extensions import db, limiter
 from app.utils.decorators import require_admin
 from app.utils.pagination import paginate_query
 from app.models.cause import Cause, CauseStatus, slugify
@@ -52,6 +52,7 @@ def _parse_gallery(value):
 # --- Public ---------------------------------------------------------
 
 @causes_bp.get("/api/causes")
+@limiter.limit("100 per hour")
 def list_causes():
     """Public listing — only published causes are ever visible here
     (spec #84). Draft/archived causes never leak through this endpoint."""
@@ -73,6 +74,7 @@ def list_causes():
 
 
 @causes_bp.get("/api/causes/<string:slug>")
+@limiter.limit("200 per hour")
 def get_cause(slug):
     cause = Cause.query.filter_by(slug=slug, status=CauseStatus.PUBLISHED).first()
     if cause is None:
@@ -84,6 +86,7 @@ def get_cause(slug):
 
 @causes_bp.get("/api/admin/causes")
 @require_admin
+@limiter.limit("60 per minute")
 def list_causes_admin():
     """Admins see every cause regardless of status — draft/archived included."""
     query = Cause.query
@@ -107,6 +110,7 @@ def list_causes_admin():
 
 @causes_bp.post("/api/admin/causes")
 @require_admin
+@limiter.limit("30 per hour")
 def create_cause():
     payload = request.get_json(silent=True) or {}
     title = (payload.get("title") or "").strip()
@@ -149,6 +153,7 @@ def create_cause():
         beneficiary_id=beneficiary_id,
         cover_image_url=payload.get("cover_image_url"),
         gallery=gallery,
+        payment_link=payload.get("payment_link"),
         goal_amount=payload.get("goal_amount"),
         currency=payload.get("currency", "KES"),
         status=CauseStatus.DRAFT,
@@ -178,6 +183,7 @@ def create_cause():
 
 @causes_bp.patch("/api/admin/causes/<string:cause_id>")
 @require_admin
+@limiter.limit("60 per hour")
 def update_cause(cause_id):
     cause = Cause.query.get(cause_id)
     if cause is None:
@@ -214,6 +220,7 @@ def update_cause(cause_id):
         "beneficiary_id",
         "cover_image_url",
         "gallery",
+        "payment_link",
         "goal_amount",
         "currency",
         "featured",
@@ -251,6 +258,7 @@ def update_cause(cause_id):
 
 @causes_bp.post("/api/admin/causes/<string:cause_id>/publish")
 @require_admin
+@limiter.limit("30 per hour")
 def publish_cause(cause_id):
     cause = Cause.query.get(cause_id)
     if cause is None:
@@ -271,6 +279,7 @@ def publish_cause(cause_id):
 
 @causes_bp.post("/api/admin/causes/<string:cause_id>/archive")
 @require_admin
+@limiter.limit("30 per hour")
 def archive_cause(cause_id):
     """Archiving never deletes the row — historical donations may still
     reference this cause (spec #82)."""
